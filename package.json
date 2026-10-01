@@ -1,0 +1,8 @@
+{
+  "name": "poker-table",
+  "version": "1.0.0",
+  "description": "Simple online poker table (dealer + up to 8 players)",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}

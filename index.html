@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Poker Table</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:#0b5d34;color:#fff;padding:16px;min-height:100vh}
+h1{text-align:center;margin:8px 0 16px}
+.panel{max-width:420px;margin:0 auto;background:#0a4a2a;padding:16px;border-radius:12px}
+label{display:block;margin:12px 0 4px;font-size:14px;opacity:.85}
+input,select{width:100%;padding:10px;font-size:16px;border-radius:8px;border:0}
+button{padding:10px 14px;font-size:15px;border:0;border-radius:8px;cursor:pointer;background:#e8e8e8;margin:4px 4px 0 0}
+.tabs{display:flex;gap:8px;margin-top:14px}
+.tabs button{flex:1;margin:0}
+.tabs .on{background:#f2c94c;font-weight:700}
+.go{background:#f2c94c;font-weight:700}
+.panel .go{width:100%;margin-top:16px}
+.err{color:#ffb4b4;min-height:1em}
+.wrap{max-width:900px;margin:0 auto}
+.bar{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center}
+.board{display:flex;gap:8px;justify-content:center;margin:16px 0;flex-wrap:wrap}
+.card{width:56px;height:80px;background:#fff;color:#111;border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:18px;font-weight:700;box-shadow:0 2px 6px #0007}
+.card b{font-size:26px}
+.card.red{color:#d00}
+.card.back{background:repeating-linear-gradient(45deg,#2b4a9e,#2b4a9e 6px,#1d3577 6px,#1d3577 12px);border:2px solid #fff}
+.card.empty{background:#ffffff18;box-shadow:none;border:2px dashed #ffffff55}
+.seats{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.seat{background:#0a4a2a;border-radius:12px;padding:10px;text-align:center;border:2px solid transparent}
+.seat.me{border-color:#f2c94c}
+.seat.win{border-color:#4cf28a;background:#0f6b3a}
+.seat.folded{opacity:.5}
+.seat.empty{opacity:.4}
+.seat .cards{display:flex;gap:6px;justify-content:center;margin:8px 0;min-height:80px}
+.nm{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub{font-size:13px;min-height:1.2em}
+.ctl{margin-top:16px;text-align:center}
+.kick{font-size:12px;padding:4px 8px;background:#a33;color:#fff}
+.link{font-size:13px;word-break:break-all;opacity:.9;margin-top:6px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const app = document.getElementById("app");
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const val = (id) => document.getElementById(id).value.trim();
+let session = null, last = "", timer = null, role = "player";
+try { session = JSON.parse(localStorage.getItem("poker_session") || "null"); } catch (e) {}
+function save() {
+  try { session ? localStorage.setItem("poker_session", JSON.stringify(session)) : localStorage.removeItem("poker_session"); } catch (e) {}
+}
+async function api(path, body) {
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    return await r.json();
+  } catch (e) { return { error: "Network error" }; }
+}
+
+// ---------- Home ----------
+function renderHome(msg) {
+  clearTimeout(timer);
+  last = "";
+  const pre = new URLSearchParams(location.search).get("room") || "";
+  if (pre) role = "player";
+  let opts = "";
+  for (let n = 2; n <= 8; n++) opts += `<option value="${n}" ${n === 8 ? "selected" : ""}>${n} players</option>`;
+  app.innerHTML = `
+  <h1>♠ Poker Table ♥</h1>
+  <div class="panel">
+    <label>Your name</label>
+    <input id="name" maxlength="16" placeholder="e.g. Alex">
+    <div class="tabs">
+      <button class="${role === "dealer" ? "on" : ""}" onclick="setRole('dealer')">I'm the Dealer</button>
+      <button class="${role === "player" ? "on" : ""}" onclick="setRole('player')">I'm a Player</button>
+    </div>
+    ${role === "dealer"
+      ? `<label>Seats at the table (2–8)</label><select id="max">${opts}</select>
+         <button class="go" onclick="createRoom()">Create room</button>`
+      : `<label>Room code</label>
+         <input id="code" maxlength="4" value="${esc(pre)}" placeholder="ABCD" style="text-transform:uppercase">
+         <button class="go" onclick="joinRoom()">Join room</button>`}
+    <p class="err" id="err">${esc(msg || "")}</p>
+  </div>`;
+}
+function setRole(r) {
+  const n = document.getElementById("name").value;
+  role = r;
+  renderHome();
+  document.getElementById("name").value = n;
+}
+function showErr(m) { document.getElementById("err").textContent = m; }
+async function createRoom() {
+  const r = await api("/api/create", { name: val("name"), max: val("max") });
+  if (r.error) return showErr(r.error);
+  startSession(r.code, r.token);
+}
+async function joinRoom() {
+  const r = await api("/api/join", { name: val("name"), code: val("code").toUpperCase() });
+  if (r.error) return showErr(r.error);
+  startSession(r.code, r.token);
+}
+function startSession(code, token) {
+  session = { code, token };
+  save();
+  history.replaceState(null, "", "/");
+  poll();
+}
+
+// ---------- Room ----------
+async function poll() {
+  clearTimeout(timer);
+  if (!session) return renderHome();
+  try {
+    const r = await fetch("/api/state?code=" + encodeURIComponent(session.code) + "&token=" + encodeURIComponent(session.token));
+    if (r.status === 404 || r.status === 403) {
+      session = null; save();
+      return renderHome("Room closed, or you were removed from it.");
+    }
+    const txt = await r.text();
+    if (txt !== last) { last = txt; renderRoom(JSON.parse(txt)); }
+  } catch (e) {}
+  timer = setTimeout(poll, 1500);
+}
+async function act(action, extra) {
+  const r = await api("/api/action", Object.assign({ code: session.code, token: session.token, action }, extra || {}));
+  if (r.error) alert(r.error);
+  poll();
+}
+function kick(seat) { if (confirm("Remove this player?")) act("kick", { seat }); }
+function closeRoom() { if (confirm("Close the room for everyone?")) act("close"); }
+async function leaveRoom() {
+  if (!confirm("Leave the table?")) return;
+  await api("/api/action", { code: session.code, token: session.token, action: "leave" });
+  session = null; save(); renderHome();
+}
+function copyLink(code) {
+  const link = location.origin + "/?room=" + code;
+  if (navigator.clipboard) navigator.clipboard.writeText(link).then(() => alert("Link copied!"), () => prompt("Copy this link:", link));
+  else prompt("Copy this link:", link);
+}
+function cardHtml(c) {
+  if (!c) return '<div class="card back"></div>';
+  const red = c.s === "♥" || c.s === "♦";
+  return `<div class="card ${red ? "red" : ""}"><span>${esc(c.r)}</span><b>${esc(c.s)}</b></div>`;
+}
+
+function renderRoom(s) {
+  const PH = { waiting: "Waiting for the dealer", preflop: "Pre-flop", flop: "Flop", turn: "Turn", river: "River", showdown: "Showdown" };
+  const inHand = ["preflop", "flop", "turn", "river"].includes(s.phase);
+  const me = s.players.find((p) => p.you);
+
+  let board = "";
+  for (let i = 0; i < 5; i++) board += s.community[i] ? cardHtml(s.community[i]) : '<div class="card empty"></div>';
+
+  const bySeat = {};
+  s.players.forEach((p) => (bySeat[p.seat] = p));
+  let seats = "";
+  for (let i = 0; i < s.max; i++) {
+    const p = bySeat[i];
+    if (!p) {
+      seats += `<div class="seat empty"><div class="nm">Seat ${i + 1}</div><div class="sub">Empty</div></div>`;
+      continue;
+    }
+    const cls = ["seat"];
+    if (p.you) cls.push("me");
+    if (p.folded) cls.push("folded");
+    if (p.winner) cls.push("win");
+    const sub = p.handName || (p.folded ? "Folded" : (!p.inHand && inHand ? "Waiting for next hand" : ""));
+    seats += `<div class="${cls.join(" ")}">
+      <div class="nm">${esc(p.name)}${p.you ? " (you)" : ""}</div>
+      <div class="cards">${p.cards.map(cardHtml).join("")}</div>
+      <div class="sub">${p.winner ? "🏆 " : ""}${esc(sub)}</div>
+      ${s.role === "dealer" ? `<button class="kick" onclick="kick(${p.seat})">Kick</button>` : ""}
+    </div>`;
+  }
+
+  let ctl = "";
+  if (s.role === "dealer") {
+    let label, action;
+    if (!inHand) { label = s.phase === "waiting" ? "Deal hand" : "New hand"; action = "deal"; }
+    else if (s.contenders <= 1 || s.phase === "river") { label = "Showdown"; action = "showdown"; }
+    else { label = "Deal " + { preflop: "flop", flop: "turn", turn: "river" }[s.phase]; action = "next"; }
+    ctl = `<button class="go" onclick="act('${action}')">${label}</button>`;
+    if (inHand) ctl += `<button onclick="act('deal')">Reshuffle and redeal</button>`;
+    ctl += `<button onclick="closeRoom()">Close room</button>`;
+  } else {
+    if (me && inHand && me.inHand && !me.folded) ctl += `<button class="go" onclick="act('fold')">Fold</button>`;
+    ctl += `<button onclick="leaveRoom()">Leave table</button>`;
+  }
+
+  app.innerHTML = `<div class="wrap">
+    <div class="bar">
+      <div><b>Room ${esc(s.code)}</b> · ${s.players.length}/${s.max} seated · Dealer: ${esc(s.dealerName)}</div>
+      <div><button onclick="copyLink('${esc(s.code)}')">Copy invite link</button></div>
+    </div>
+    <h2 style="text-align:center;margin:12px 0 0">${PH[s.phase]}</h2>
+    <div class="board">${board}</div>
+    <div class="seats">${seats}</div>
+    <div class="ctl">${ctl}</div>
+  </div>`;
+}
+
+if (session) poll(); else renderHome();
+</script>
+</body>
+</html>
